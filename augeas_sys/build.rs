@@ -9,8 +9,10 @@ fn main() {
         .atleast_version("1.10.1")
         .probe("augeas")
         .unwrap();
-    
-    let include_paths = augeas.include_paths.iter()
+
+    let include_paths = augeas
+        .include_paths
+        .iter()
         .map(|path| format!("-I{}", path.display()));
 
     let bindings = bindgen::Builder::default()

@@ -1,14 +1,12 @@
-use std::fmt;
-use std::ffi::NulError;
-use ::Augeas;
-use ::util::ptr_to_string;
 use augeas_sys::*;
+use std::ffi::NulError;
+use std::fmt;
 
-#[derive(Clone,PartialEq,Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Error {
     Augeas(AugeasError),
     Parse(ParseError),
-    Nul(NulError)
+    Nul(NulError),
 }
 
 impl fmt::Display for Error {
@@ -16,25 +14,26 @@ impl fmt::Display for Error {
         match *self {
             Error::Augeas(ref err) => err.fmt(f),
             Error::Nul(ref err) => err.fmt(f),
-            Error::Parse(ref err) => err.fmt(f)
+            Error::Parse(ref err) => err.fmt(f),
         }
     }
 }
 
-#[derive(Clone,PartialEq,Eq,Debug,Default)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AugeasError {
-    pub code          : ErrorCode,
-    pub message       : Option<String>,
-    pub minor_message : Option<String>,
-    pub details       : Option<String>
+    pub code: ErrorCode,
+    pub message: Option<String>,
+    pub minor_message: Option<String>,
+    pub details: Option<String>,
 }
 
 impl AugeasError {
     pub fn new_no_mem(message: impl Into<String>) -> AugeasError {
         AugeasError {
-            code : ErrorCode::NoMem,
-            message : Some(message.into()),
-            .. Default::default()
+            code: ErrorCode::NoMem,
+            message: Some(message.into()),
+            minor_message: None,
+            details: None,
         }
     }
 }
@@ -43,15 +42,8 @@ impl ::std::error::Error for AugeasError {
     fn description(&self) -> &str {
         match self.message {
             None => "No description",
-            Some(ref s) => s
+            Some(ref s) => s,
         }
-    }
-}
-
-fn maybe_write(f: &mut fmt::Formatter, opt: &Option<String>) -> fmt::Result {
-    match *opt {
-        Some(ref s) => write!(f, "      {}\n", s),
-        None => Ok(())
     }
 }
 
@@ -61,18 +53,26 @@ impl fmt::Display for AugeasError {
     //                {minor_message}
     //                {details}
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let m = self.message.as_ref().map(String::as_ref).unwrap_or("");
-        write!(f, "augeas error:{:?}:{}\n", self.code, m).
-            and(maybe_write(f, &self.minor_message)).
-            and(maybe_write(f, &self.details))
+        let message = self.message.as_ref().map(String::as_ref).unwrap_or("");
+        writeln!(f, "augeas error:{:?}:{}", self.code, message)?;
+
+        if let Some(minor_message) = &self.minor_message {
+            writeln!(f, "      {}", minor_message)?;
+        }
+
+        if let Some(details) = &self.details {
+            writeln!(f, "      {}", details)?;
+        }
+
+        Ok(())
     }
 }
 
 impl Error {
-    pub fn is_code(&self, code : ErrorCode) -> bool {
+    pub fn is_code(&self, code: ErrorCode) -> bool {
         match self {
             Error::Augeas(err) => err.code == code,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -83,26 +83,15 @@ impl From<NulError> for Error {
     }
 }
 
-impl <'a> From<&'a Augeas> for Error {
-    fn from(aug: &'a Augeas) -> Error {
-        let err = unsafe { aug_error(aug.ptr) };
-        let err = ErrorCode::from_raw(err as _);
-        let msg = unsafe { ptr_to_string(aug_error_message(aug.ptr)) };
-        let mmsg = unsafe { ptr_to_string(aug_error_minor_message(aug.ptr)) };
-        let det = unsafe { ptr_to_string(aug_error_details(aug.ptr)) };
-        Error::Augeas(AugeasError {
-            code: err,
-            message: msg,
-            minor_message: mmsg,
-            details: det
-       })
+impl From<AugeasError> for Error {
+    fn from(err: AugeasError) -> Error {
+        Error::Augeas(err)
     }
 }
 
 #[repr(C)]
-#[derive(Copy,Clone,PartialEq,Eq,Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ErrorCode {
-    NoError,
     NoMem,
     Internal,
     PathExpr,
@@ -117,14 +106,14 @@ pub enum ErrorCode {
     BadArg,
     Label,
     CopyDescendant,
-    Unknown
+    Unknown,
 }
 
 impl ErrorCode {
     #[allow(non_upper_case_globals)]
-    pub fn from_raw(code: aug_errcode_t) -> ErrorCode {
-        match code {
-            aug_errcode_t_AUG_NOERROR => ErrorCode::NoError,
+    pub fn from_raw(code: aug_errcode_t) -> Option<ErrorCode> {
+        Some(match code {
+            aug_errcode_t_AUG_NOERROR => return None,
             aug_errcode_t_AUG_ENOMEM => ErrorCode::NoMem,
             aug_errcode_t_AUG_EINTERNAL => ErrorCode::Internal,
             aug_errcode_t_AUG_EPATHX => ErrorCode::PathExpr,
@@ -140,35 +129,29 @@ impl ErrorCode {
             aug_errcode_t_AUG_ELABEL => ErrorCode::Label,
             aug_errcode_t_AUG_ECPDESC => ErrorCode::CopyDescendant,
             _ => ErrorCode::Unknown,
-        }
+        })
     }
 }
 
-impl Default for ErrorCode {
-    fn default() -> ErrorCode { ErrorCode::NoError }
-}
-
 impl From<ErrorCode> for Error {
-    fn from(code : ErrorCode) -> Error {
+    fn from(code: ErrorCode) -> Error {
         Error::Augeas(AugeasError {
-            code : code,
-            message : None,
-            minor_message : None,
-            details : None
+            code,
+            message: None,
+            minor_message: None,
+            details: None,
         })
     }
 }
 
 impl From<String> for Error {
     fn from(kind: String) -> Error {
-        Error::Parse(ParseError {
-            kind: kind
-        })
+        Error::Parse(ParseError { kind })
     }
 }
 
 impl fmt::Display for ParseError {
-    fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "parse error of kind {}", self.kind)
     }
 }
@@ -177,5 +160,5 @@ impl fmt::Display for ParseError {
 pub struct ParseError {
     // There's a lot more information we can/should pull out of the
     // tree when parsing goes wrong
-    pub kind : String
+    pub kind: String,
 }

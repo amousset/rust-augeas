@@ -1,5 +1,5 @@
-use std::ffi::CStr;
 use libc::c_char;
+use std::ffi::CStr;
 
 pub fn ptr_to_string(s: *const c_char) -> Option<String> {
     if s.is_null() {
