@@ -11,32 +11,34 @@
 //! ## Summary
 //!
 //! This crate implements Rust bindings to [augeas](http://augeas.net/), a library for reading,
-//! modifying, and writing structured file, like configuration files.
+//! modifying, and writing a structured file, like configuration files.
 //!
 //! A typical interaction looks like this:
 //!
 //! ```
-//!   extern crate augeas_sys;
-//!   extern crate augeas;
+//! use augeas::{Augeas, Flags};
 //!
-//!   use augeas_sys;
-//!   use augeas::{Augeas,Flags};
+//! let mut aug = Augeas::init("/", "", Flags::NONE).unwrap();
 //!
-//!   let mut aug = Augeas::init("/", "", Flags::None).unwrap();
-//!
-//!   let entry = aug.get("etc/hosts/*[canonical = 'host.example.com']/ip").unwrap();
-//!
-//!   if let Some(ip) = entry {
+//! // Get the ip address for host.example.com from `/etc/hosts`.
+//! let entry = aug.get("etc/hosts/*[canonical = 'host.example.com']/ip")?;
+//! if let Some(ip) = entry {
 //!     println!("The ip for host.example.com is {}", ip);
-//!   } else {
+//! } else {
 //!     println!("There is no entry for host.example.com in /etc/hosts");
-//!   }
+//! }
 //!
-//!   // Add an alias for host.example.com
-//!   aug.set("etc/hosts/*[canonical = 'host.example.com']/alias[last()+1]", "server.example.com");
+//! // Add an alias for host.example.com.
+//! aug.set(
+//!     "etc/hosts/*[canonical = 'host.example.com']/alias[last()+1]",
+//!     "server.example.com",
+//! )?;
+//! # Ok::<(), augeas::Error>(())
 //! ```
-extern crate augeas_sys;
-extern crate libc;
+
+#![warn(rust_2018_idioms, unused_qualifications)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 #[macro_use]
 extern crate bitflags;
 
@@ -94,7 +96,7 @@ impl From<Position> for c_int {
 /// The [`span`](#method.span) indicates where in a file a particular node
 /// was found. The `label` and `value` give the character range from which
 /// the node's label and value were read, and `span` gives the entire region
-/// in the file from which the node was construted. If any of these values are
+/// in the file from which the node was constructed. If any of these values are
 /// not available, e.g., because the node has no value, the corresponding range
 /// will be empty.
 ///
@@ -129,7 +131,7 @@ impl Augeas {
     /// Create a new Augeas handle.
     ///
     /// Use `root` as the filesystem root. If `root` is `None`, use the value
-    /// of the environment variable `AUGEAS_ROOT`, if it is set; otherwise,
+    /// of the environment variable `AUGEAS_ROOT` if it is set; otherwise,
     /// use "/".
     ///
     /// The `loadpath` is a colon-separated list of directories that modules
@@ -137,21 +139,20 @@ impl Augeas {
     /// and the directories listed in the environment variable AUGEAS_LENS_LIB
     ///
     /// The `flags` are a bitmask of values from `AugFlag`.
-    ///
     pub fn init<'a>(
         root: impl Into<Option<&'a str>>,
-        loadpath: &str,
+        load_path: &str,
         flags: Flags,
     ) -> Result<Self> {
-        let ref root = match root.into() {
+        let root = &(match root.into() {
             Some(root) => Some(CString::new(root)?),
             None => None,
-        };
+        });
         let root = match root {
             Some(root) => root.as_ptr(),
             None => ptr::null(),
         };
-        let ref loadpath = CString::new(loadpath)?;
+        let loadpath = &(CString::new(load_path)?);
         let loadpath = loadpath.as_ptr();
         let flags = flags.bits();
         let augeas = unsafe { aug_init(root, loadpath, flags) };
@@ -172,7 +173,7 @@ impl Augeas {
     ///
     /// It is an error if `path` matches more than one node.
     pub fn get(&self, path: &str) -> Result<Option<String>> {
-        let ref path = CString::new(path)?;
+        let path = &(CString::new(path)?);
         let path = path.as_ptr();
         let mut value: *const c_char = ptr::null_mut();
 
@@ -220,12 +221,12 @@ impl Augeas {
                 .map(|i| {
                     let match_ptr: *const c_char = transmute(*matches_ptr.offset(i as isize));
                     let str = ptr_to_string(match_ptr).unwrap();
-                    libc::free(transmute(match_ptr));
+                    libc::free(transmute::<*const i8, *mut libc::c_void>(match_ptr));
                     str
                 })
                 .collect::<Vec<String>>();
 
-            libc::free(transmute(matches_ptr));
+            libc::free(transmute::<*mut *mut i8, *mut libc::c_void>(matches_ptr));
 
             Ok(matches_vec)
         }
@@ -420,7 +421,7 @@ impl Augeas {
                 return Ok(None);
             } else {
                 self.check_error()?;
-                return Ok(None)
+                return Ok(None);
             }
         }
 
@@ -686,13 +687,13 @@ impl Drop for Augeas {
 #[test]
 fn get_test() {
     use error::ErrorCode;
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
     let root_uid = aug
         .get("etc/passwd/root/uid")
         .unwrap()
         .unwrap_or("unknown".to_string());
 
-    assert!(&root_uid == "0", "ID of root was {}", root_uid);
+    assert_eq!(&root_uid, "0", "ID of root was {}", root_uid);
 
     let nothing = aug.get("/foo");
     assert!(nothing.is_ok());
@@ -709,18 +710,18 @@ fn get_test() {
 
 #[test]
 fn label_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
     let root_name = aug
         .label("etc/passwd/root")
         .unwrap()
         .unwrap_or("unknown".to_string());
 
-    assert!(&root_name == "root", "name of root was {}", root_name);
+    assert_eq!(&root_name, "root", "name of root was {}", root_name);
 }
 
 #[test]
 fn matches_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let users = aug.matches("etc/passwd/*").unwrap();
     let count = aug.count("etc/passwd/*").unwrap();
@@ -733,7 +734,7 @@ fn matches_test() {
 
 #[test]
 fn insert_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.insert("etc/passwd/root", "before", Position::Before)
         .unwrap();
@@ -752,7 +753,7 @@ fn insert_test() {
 
 #[test]
 fn rm_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let e = aug.rm("/augeas[");
     assert!(e.is_err());
@@ -763,7 +764,7 @@ fn rm_test() {
 
 #[test]
 fn mv_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let e = aug.mv("etc/passwd", "etc/passwd/root");
     assert!(e.is_err());
@@ -775,7 +776,7 @@ fn mv_test() {
 
 #[test]
 fn defvar_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.defvar("x", "etc/passwd/*").unwrap();
     let n = aug.count("$x").unwrap();
@@ -785,7 +786,7 @@ fn defvar_test() {
 
 #[test]
 fn defnode_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let created = aug.defnode("y", "etc/notthere", "there").unwrap();
     assert!(created);
@@ -799,7 +800,7 @@ fn defnode_test() {
 
 #[test]
 fn load_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.set("etc/passwd/root/uid", "42").unwrap();
     aug.load().unwrap();
@@ -809,7 +810,7 @@ fn load_test() {
 
 #[test]
 fn setm_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let count = aug.setm("etc/passwd", "*/shell", "/bin/zsh").unwrap();
     assert_eq!(9, count);
@@ -817,7 +818,7 @@ fn setm_test() {
 
 #[test]
 fn span_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::EnableSpan).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::ENABLE_SPAN).unwrap();
 
     // happy path
     let span = aug.span("etc/passwd/root").unwrap().unwrap();
@@ -837,7 +838,7 @@ fn span_test() {
 
 #[test]
 fn store_retrieve_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.set("/text/in", "alex:x:12:12:Alex:/home/alex:/bin/sh\n")
         .unwrap();
@@ -867,7 +868,7 @@ fn store_retrieve_test() {
 
 #[test]
 fn rename_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.rename("etc/passwd/root", "ruth").unwrap();
 
@@ -880,7 +881,7 @@ fn rename_test() {
 
 #[test]
 fn transform_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.transform("Hosts.lns", "/usr/local/etc/hosts", false)
         .unwrap();
@@ -892,7 +893,7 @@ fn transform_test() {
 
 #[test]
 fn cp_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.cp("etc/passwd/root", "etc/passwd/ruth").unwrap();
     let ruth = aug.get("etc/passwd/ruth/uid").unwrap().unwrap();
@@ -904,7 +905,7 @@ fn cp_test() {
 
 #[test]
 fn escape_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     // no escaping needed
     let n = aug.escape_name("foo");
@@ -916,7 +917,7 @@ fn escape_test() {
 
 #[test]
 fn load_file_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NoLoad).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NO_LOAD).unwrap();
 
     aug.load_file("/etc/passwd").unwrap();
     let root = aug.get("etc/passwd/root/uid").unwrap();
@@ -930,7 +931,7 @@ fn load_file_test() {
 
 #[test]
 fn source_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     let s = aug.source("etc/passwd/root/uid").unwrap();
     // s should be Some("/files/etc/passwd") but Augeas versions before
@@ -940,7 +941,7 @@ fn source_test() {
 
 #[test]
 fn ns_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
     aug.defvar("x", "etc/passwd/*").unwrap();
     aug.defvar("uid", "etc/passwd/*/uid").unwrap();
@@ -974,14 +975,14 @@ fn ns_test() {
 
 #[test]
 fn error_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::None).unwrap();
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
     let garbled = aug.matches("/invalid[");
 
     if let Err(Error::Augeas(err)) = garbled {
-        assert!(err.code == ErrorCode::PathExpr);
-        assert!(err.message.unwrap() == "Invalid path expression");
-        assert!(err.minor_message.unwrap() == "illegal string literal");
-        assert!(err.details.unwrap() == "/invalid[|=|")
+        assert_eq!(err.code, ErrorCode::PathExpr);
+        assert_eq!(err.message.unwrap(), "Invalid path expression");
+        assert_eq!(err.minor_message.unwrap(), "illegal string literal");
+        assert_eq!(err.details.unwrap(), "/invalid[|=|")
     } else {
         panic!("Unexpected value: {:?}", garbled)
     }

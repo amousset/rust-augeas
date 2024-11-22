@@ -10,7 +10,7 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Error::Augeas(ref err) => err.fmt(f),
             Error::Nul(ref err) => err.fmt(f),
@@ -52,7 +52,7 @@ impl fmt::Display for AugeasError {
     //   augeas error:{code}:{message}
     //                {minor_message}
     //                {details}
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = self.message.as_ref().map(String::as_ref).unwrap_or("");
         writeln!(f, "augeas error:{:?}:{}", self.code, message)?;
 
@@ -151,7 +151,7 @@ impl From<String> for Error {
 }
 
 impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "parse error of kind {}", self.kind)
     }
 }
@@ -159,6 +159,6 @@ impl fmt::Display for ParseError {
 #[derive(Clone, PartialEq, Debug)]
 pub struct ParseError {
     // There's a lot more information we can/should pull out of the
-    // tree when parsing goes wrong
+    // tree when parsing goes wrong.
     pub kind: String,
 }

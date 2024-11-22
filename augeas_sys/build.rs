@@ -18,9 +18,9 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(include_paths)
-        .whitelist_function("aug_.*")
-        .whitelist_type("aug_.*")
-        .whitelist_var("aug_.*")
+        .allowlist_function("aug_.*")
+        .allowlist_type("aug_.*")
+        .allowlist_var("aug_.*")
         .generate()
         .expect("Unable to generate bindings");
 
