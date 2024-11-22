@@ -1,5 +1,4 @@
 extern crate augeas;
-
 use augeas::{Augeas, Flags};
 
 fn main() {

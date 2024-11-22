@@ -152,10 +152,10 @@ impl Augeas {
             Some(root) => root.as_ptr(),
             None => ptr::null(),
         };
-        let loadpath = &(CString::new(load_path)?);
-        let loadpath = loadpath.as_ptr();
+        let load_path = &(CString::new(load_path)?);
+        let load_path = load_path.as_ptr();
         let flags = flags.bits();
-        let augeas = unsafe { aug_init(root, loadpath, flags) };
+        let augeas = unsafe { aug_init(root, load_path, flags) };
 
         if augeas.is_null() {
             let message = String::from("Failed to initialize Augeas");
@@ -214,10 +214,10 @@ impl Augeas {
 
         unsafe {
             let mut matches_ptr: *mut *mut c_char = ptr::null_mut();
-            let nmatches = aug_match(self.ptr, c_path.as_ptr(), &mut matches_ptr);
+            let num_matches = aug_match(self.ptr, c_path.as_ptr(), &mut matches_ptr);
             self.check_error()?;
 
-            let matches_vec = (0..nmatches)
+            let matches_vec = (0..num_matches)
                 .map(|i| {
                     let match_ptr: *const c_char = transmute(*matches_ptr.offset(i as isize));
                     let str = ptr_to_string(match_ptr).unwrap();
@@ -298,7 +298,7 @@ impl Augeas {
         let r = unsafe { aug_rm(self.ptr, path.as_ptr()) };
         self.check_error()?;
         // coercing i32 to u32 is fine here since r is only negative
-        // when an error occurred and make_result notices that from
+        // when an error occurred and `check_error` notices that from
         // the result of aug_error
         Ok(r as u32)
     }
@@ -316,7 +316,7 @@ impl Augeas {
 
     /// Define a variable `name` whose value is the result of evaluating
     /// `expr`. If a variable `name` already exists, its name will be
-    /// replaced with the result of evaluating `expr`.  Context will not be
+    /// replaced with the result of evaluating `expr`. Context will not be
     /// applied to `expr`.
     ///
     /// Path variables can be used in path expressions later on by prefixing
@@ -702,7 +702,7 @@ fn get_test() {
     let many = aug.get("etc/passwd/*");
 
     if let Err(Error::Augeas(err)) = many {
-        assert!(err.code == ErrorCode::ManyMatches)
+        assert_eq!(err.code, ErrorCode::ManyMatches)
     } else {
         panic!("Unexpected value: {:?}", many)
     }

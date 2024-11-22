@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "augeas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "augeas_sys",
  "bitflags",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "augeas_sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -94,9 +94,9 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
 name = "itertools"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
