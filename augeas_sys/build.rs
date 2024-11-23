@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 fn main() {
     let augeas = pkg_config::Config::new()
-        .atleast_version("1.10.1")
+        .atleast_version("1.13.0")
         .probe("augeas")
         .unwrap();
 

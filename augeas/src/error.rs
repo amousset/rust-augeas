@@ -38,20 +38,14 @@ impl AugeasError {
     }
 }
 
-impl ::std::error::Error for AugeasError {
-    fn description(&self) -> &str {
-        match self.message {
-            None => "No description",
-            Some(ref s) => s,
-        }
-    }
-}
-
 impl fmt::Display for AugeasError {
-    // Write
-    //   augeas error:{code}:{message}
-    //                {minor_message}
-    //                {details}
+    // Write:
+    // ```
+    // augeas error:{code}:{message}
+    //              {minor_message}
+    //              {details}
+    //              {details}
+    // ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = self.message.as_ref().map(String::as_ref).unwrap_or("");
         writeln!(f, "augeas error:{:?}:{}", self.code, message)?;

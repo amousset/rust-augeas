@@ -76,7 +76,7 @@ pub struct Augeas {
 /// Use this enum with [`insert`](#method.insert) to indicate whether the
 /// new node should be inserted before or after the node passed to
 /// [`insert`](#method.insert)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Position {
     Before,
     After,
@@ -100,8 +100,8 @@ impl From<Position> for c_int {
 /// not available, e.g., because the node has no value, the corresponding range
 /// will be empty.
 ///
-/// The `filename` provides the entire path to the file in the file system
-#[derive(Debug)]
+/// The `filename` provides the entire path to the file in the file system.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Span {
     pub label: Range<u32>,
     pub value: Range<u32>,
@@ -120,7 +120,7 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Attr {
     pub label: Option<String>,
     pub value: Option<String>,
@@ -141,7 +141,7 @@ impl Augeas {
     /// The `flags` are a bitmask of values from `AugFlag`.
     pub fn init<'a>(
         root: impl Into<Option<&'a str>>,
-        load_path: &str,
+        loadpath: &str,
         flags: Flags,
     ) -> Result<Self> {
         let root = &(match root.into() {
@@ -152,7 +152,7 @@ impl Augeas {
             Some(root) => root.as_ptr(),
             None => ptr::null(),
         };
-        let load_path = &(CString::new(load_path)?);
+        let load_path = &(CString::new(loadpath)?);
         let load_path = load_path.as_ptr();
         let flags = flags.bits();
         let augeas = unsafe { aug_init(root, load_path, flags) };
@@ -541,6 +541,21 @@ impl Augeas {
         unsafe { aug_source(self.ptr, path.as_ptr(), &mut file_path) };
         let s = ptr_to_string(file_path);
         unsafe { libc::free(file_path as *mut libc::c_void) };
+        self.check_error()?;
+
+        Ok(s)
+    }
+
+    /// Return the contents of the file that would be written for the file associated with `path`.
+    //  If there is no file corresponding to `path`, it returns `None`.
+    pub fn preview(&self, path: &str) -> Result<Option<String>> {
+        let path = CString::new(path)?;
+        let mut out: *mut c_char = ptr::null_mut();
+
+        unsafe { aug_preview(self.ptr, path.as_ptr(), &mut out) };
+
+        let s = ptr_to_string(out);
+        unsafe { libc::free(out as *mut libc::c_void) };
         self.check_error()?;
 
         Ok(s)
@@ -937,6 +952,18 @@ fn source_test() {
     // s should be Some("/files/etc/passwd") but Augeas versions before
     // 1.11 had a bug that makes the result always None
     assert!(s.is_none() || s.unwrap() == "/files/etc/passwd")
+}
+
+#[test]
+fn preview_test() {
+    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+
+    let s = aug.preview("etc/non-existing").unwrap_err();
+    assert!(matches!(s, Error::Augeas(_)));
+
+    let s = aug.preview("etc/passwd/root/uid").unwrap();
+    let content = include_str!("../tests/test_root/etc/passwd");
+    assert_eq!(s.unwrap(), content);
 }
 
 #[test]
