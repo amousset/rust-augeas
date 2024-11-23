@@ -76,7 +76,7 @@ pub struct Augeas {
 /// Use this enum with [`insert`](#method.insert) to indicate whether the
 /// new node should be inserted before or after the node passed to
 /// [`insert`](#method.insert)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Position {
     Before,
     After,
@@ -100,8 +100,8 @@ impl From<Position> for c_int {
 /// not available, e.g., because the node has no value, the corresponding range
 /// will be empty.
 ///
-/// The `filename` provides the entire path to the file in the file system
-#[derive(Debug)]
+/// The `filename` provides the entire path to the file in the file system.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Span {
     pub label: Range<u32>,
     pub value: Range<u32>,
@@ -120,7 +120,7 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Attr {
     pub label: Option<String>,
     pub value: Option<String>,
@@ -141,7 +141,7 @@ impl Augeas {
     /// The `flags` are a bitmask of values from `AugFlag`.
     pub fn init<'a>(
         root: impl Into<Option<&'a str>>,
-        load_path: &str,
+        loadpath: &str,
         flags: Flags,
     ) -> Result<Self> {
         let root = &(match root.into() {
@@ -152,7 +152,7 @@ impl Augeas {
             Some(root) => root.as_ptr(),
             None => ptr::null(),
         };
-        let load_path = &(CString::new(load_path)?);
+        let load_path = &(CString::new(loadpath)?);
         let load_path = load_path.as_ptr();
         let flags = flags.bits();
         let augeas = unsafe { aug_init(root, load_path, flags) };

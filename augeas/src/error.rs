@@ -11,11 +11,26 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             Error::Augeas(ref err) => err.fmt(f),
             Error::Nul(ref err) => err.fmt(f),
             Error::Parse(ref err) => err.fmt(f),
         }
+    }
+}
+
+impl Error {
+    pub fn is_code(&self, code: ErrorCode) -> bool {
+        match self {
+            Error::Augeas(err) => err.code == code,
+            _ => false,
+        }
+    }
+}
+
+impl From<NulError> for Error {
+    fn from(err: NulError) -> Error {
+        Error::Nul(err)
     }
 }
 
@@ -38,20 +53,14 @@ impl AugeasError {
     }
 }
 
-impl ::std::error::Error for AugeasError {
-    fn description(&self) -> &str {
-        match self.message {
-            None => "No description",
-            Some(ref s) => s,
-        }
-    }
-}
-
 impl fmt::Display for AugeasError {
-    // Write
+    // Write:
+    //
+    // ```
     //   augeas error:{code}:{message}
     //                {minor_message}
     //                {details}
+    // ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = self.message.as_ref().map(String::as_ref).unwrap_or("");
         writeln!(f, "augeas error:{:?}:{}", self.code, message)?;
@@ -65,27 +74,6 @@ impl fmt::Display for AugeasError {
         }
 
         Ok(())
-    }
-}
-
-impl Error {
-    pub fn is_code(&self, code: ErrorCode) -> bool {
-        match self {
-            Error::Augeas(err) => err.code == code,
-            _ => false,
-        }
-    }
-}
-
-impl From<NulError> for Error {
-    fn from(err: NulError) -> Error {
-        Error::Nul(err)
-    }
-}
-
-impl From<AugeasError> for Error {
-    fn from(err: AugeasError) -> Error {
-        Error::Augeas(err)
     }
 }
 
@@ -144,6 +132,19 @@ impl From<ErrorCode> for Error {
     }
 }
 
+impl From<AugeasError> for Error {
+    fn from(err: AugeasError) -> Error {
+        Error::Augeas(err)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct ParseError {
+    // There's a lot more information we can/should pull out of the
+    // tree when parsing goes wrong.
+    pub kind: String,
+}
+
 impl From<String> for Error {
     fn from(kind: String) -> Error {
         Error::Parse(ParseError { kind })
@@ -156,9 +157,8 @@ impl fmt::Display for ParseError {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
-pub struct ParseError {
-    // There's a lot more information we can/should pull out of the
-    // tree when parsing goes wrong.
-    pub kind: String,
+impl From<ParseError> for Error {
+    fn from(err: ParseError) -> Error {
+        Error::Parse(err)
+    }
 }
