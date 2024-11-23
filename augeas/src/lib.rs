@@ -1,17 +1,22 @@
 //! Augeas bindings for Rust
 //!
+//! [Augeas](http://augeas.net/) is a library for reading, modifying, and writing a structured file,
+//! like configuration files.
+//!
+//! This library is a low-level binding to the C API of Augeas, with a few abstractions to make it
+//! more idiomatic to use in Rust. It does not aim to provide a high-level API to manipulate
+//! configuration files, but rather to provide a safe and idiomatic way to interact with Augeas.
+//!
 //! ## Usage
 //!
-//! In `Cargo.toml`
+//! In `Cargo.toml`:
+//!
 //! ```toml
-//! [dependencies.augeas]
-//! version = "0.1.0"
+//! [dependencies]
+//! augeas = "0.2.0"
 //! ```
 //!
 //! ## Summary
-//!
-//! This crate implements Rust bindings to [augeas](http://augeas.net/), a library for reading,
-//! modifying, and writing a structured file, like configuration files.
 //!
 //! A typical interaction looks like this:
 //!
@@ -36,7 +41,7 @@
 //! # Ok::<(), augeas::Error>(())
 //! ```
 
-#![warn(rust_2018_idioms, unused_qualifications)]
+#![warn(rust_2018_idioms, unused_qualifications, missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
@@ -59,8 +64,10 @@ mod flags;
 pub use self::flags::Flags;
 
 mod util;
+use crate::error::{ErrorPosition, TreeError};
 use util::ptr_to_string;
 
+/// Shortcut for the result type used in this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The handle for the Augeas library.
@@ -76,9 +83,11 @@ pub struct Augeas {
 /// Use this enum with [`insert`](#method.insert) to indicate whether the
 /// new node should be inserted before or after the node passed to
 /// [`insert`](#method.insert)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Position {
+    /// Insert the new node before the node passed to [`insert`](#method.insert)
     Before,
+    /// Insert the new node after the node passed to [`insert`](#method.insert)
     After,
 }
 
@@ -91,7 +100,7 @@ impl From<Position> for c_int {
     }
 }
 
-/// A span in the tree
+/// A span in the tree.
 ///
 /// The [`span`](#method.span) indicates where in a file a particular node
 /// was found. The `label` and `value` give the character range from which
@@ -100,12 +109,24 @@ impl From<Position> for c_int {
 /// not available, e.g., because the node has no value, the corresponding range
 /// will be empty.
 ///
-/// The `filename` provides the entire path to the file in the file system
-#[derive(Debug)]
+/// The `filename` provides the entire path to the file in the file system.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Span {
+    /// Character range for the label of the node in a file.
+    ///
+    /// Empty if not available.
     pub label: Range<u32>,
+    /// Character range for the value of the node in a file.
+    ///
+    /// Empty if not available.
     pub value: Range<u32>,
+    /// Character range for the entire node in a file.
+    //
+    /// Empty if not available.
     pub span: Range<u32>,
+    /// The path to the file in the file system.
+    ///
+    /// `None` if the node is not associated with a file.
     pub filename: Option<String>,
 }
 
@@ -120,10 +141,14 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+/// Attributes of a node
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Attr {
+    /// The label of the node
     pub label: Option<String>,
+    /// The value of the node
     pub value: Option<String>,
+    /// The path of the file the node belongs to, or `None` if the node does not belong to a file.
     pub file_path: Option<String>,
 }
 
@@ -132,16 +157,16 @@ impl Augeas {
     ///
     /// Use `root` as the filesystem root. If `root` is `None`, use the value
     /// of the environment variable `AUGEAS_ROOT` if it is set; otherwise,
-    /// use "/".
+    /// use `/`.
     ///
     /// The `loadpath` is a colon-separated list of directories that modules
     /// should be searched in. This is in addition to the standard load path
-    /// and the directories listed in the environment variable AUGEAS_LENS_LIB
+    /// and the directories listed in the environment variable `AUGEAS_LENS_LIB`.
     ///
-    /// The `flags` are a bitmask of values from `AugFlag`.
+    /// The `flags` are a bitmask of values from `Flags`.
     pub fn init<'a>(
         root: impl Into<Option<&'a str>>,
-        load_path: &str,
+        loadpath: &str,
         flags: Flags,
     ) -> Result<Self> {
         let root = &(match root.into() {
@@ -152,17 +177,31 @@ impl Augeas {
             Some(root) => root.as_ptr(),
             None => ptr::null(),
         };
-        let load_path = &(CString::new(load_path)?);
+        let load_path = &(CString::new(loadpath)?);
         let load_path = load_path.as_ptr();
+
+        // We want to get errors to help the user understand what went wrong if possible.
+        // We force error checking after to prevent access to a broken tree.
+        let flags = flags | Flags::NO_ERROR_CLOSE;
         let flags = flags.bits();
+
         let augeas = unsafe { aug_init(root, load_path, flags) };
 
         if augeas.is_null() {
             let message = String::from("Failed to initialize Augeas");
-            return Err(Error::Augeas(AugeasError::new_no_mem(message)));
+            return Err(Error::Augeas(AugeasError::new_unknown(message)));
         }
+        let res = Augeas { ptr: augeas };
 
-        Ok(Augeas { ptr: augeas })
+        // As we set `NO_ERROR_CLOSE`, we check for errors here.
+        res.check_error()?;
+
+        Ok(res)
+    }
+
+    /// Get the version number of the Augeas library
+    pub fn version(&self) -> Result<String> {
+        Ok(self.get("/augeas/version")?.unwrap_or_default())
     }
 
     /// Lookup the value associated with `path`.
@@ -245,10 +284,19 @@ impl Augeas {
         Ok(r as u32)
     }
 
-    /// Save all pending changes to disk
+    /// Save all pending changes to disk.
     ///
     /// Turn all files in the tree for which entries have been changed,
     /// added, or deleted back into text and write them back to file.
+    ///
+    /// If `SAVE_NEWFILE` is set in the `Flags` passed to `init`, create
+    /// changed files as new files with the extension `.augnew`, and leave the
+    /// original file unmodified.
+    ///
+    /// Otherwise, if `SAVE_BACKUP` is set in the `Flags` passed to `init`,
+    /// move the original file to a new file with extension `.augsave`.
+    ///
+    /// If neither of these flags is set, overwrite the original file.
     pub fn save(&mut self) -> Result<()> {
         unsafe { aug_save(self.ptr) };
         self.check_error()?;
@@ -304,6 +352,16 @@ impl Augeas {
     }
 
     /// Move the node matching `src` to `dst`.
+    ///
+    /// `src` must match exactly one node in the tree.
+    /// `dst` must either match exactly one node in the tree or may not
+    /// exist yet. If `dst` exists already, it and all its descendants are
+    /// deleted. If `dst` does not exist yet, it and all its missing ancestors are
+    /// created.
+    ///
+    /// Note that the node `src` always becomes the node `dst`: when you move `/a/b`
+    /// to `/x`, the node `/a/b` is now called `/x`, no matter whether `/x` existed
+    /// initially or not.
     pub fn mv(&mut self, src: &str, dst: &str) -> Result<()> {
         let src = CString::new(src)?;
         let dst = CString::new(dst)?;
@@ -344,7 +402,7 @@ impl Augeas {
     }
 
     /// Define a variable `name` whose value is the result of evaluating `expr`,
-    /// which must be non-NULL and evaluate to a nodeset. If a variable `name`
+    /// which must evaluate to a nodeset. If a variable `name`
     /// already exists, its name will be replaced with the result of evaluating
     /// `expr`.
     ///
@@ -374,9 +432,34 @@ impl Augeas {
         Ok(cr == 1)
     }
 
-    /// Load the tree from file. If a tree was already loaded, reload the
-    /// tree, erasing any changes that may have been made since the last
-    /// `load` or `save`.
+    /// Load files into the tree.
+    ///
+    /// Which files to load and what lenses to use on
+    /// them is specified under `/augeas/load` in the tree; each entry
+    /// `/augeas/load/NAME` specifies a 'transform', by having itself exactly one
+    /// child `lens` and any number of children labelled `incl` and `excl`. The
+    /// value of `NAME` has no meaning.
+    ///
+    /// The `lens` grandchild of `/augeas/load` specifies which lens to use, and
+    /// can either be the fully qualified name of a lens `Module.lens` or
+    /// `@Module`. The latter form means that the lens from the transform marked
+    /// for autoloading in `MODULE` should be used.
+    ///
+    /// The `incl` and `excl` grandchildren of `/augeas/load` indicate which files
+    /// to transform. Their values are used as glob patterns. Any file that
+    /// matches at least one `incl` pattern and no `excl` pattern is
+    /// transformed. The order of `incl` and `excl` entries is irrelevant.
+    ///
+    /// When `init` is first called, it populates `/augeas/load` with the
+    /// transforms marked for autoloading in all the modules it finds.
+    ///
+    /// Before loading any files, `load` will remove everything underneath
+    /// `/augeas/files` and `/files`, regardless of whether any entries have been
+    /// modified or not.
+    ///
+    /// Note that success includes the case
+    /// where some files could not be loaded. Details of such files can be found
+    /// as `/augeas//error`.
     pub fn load(&mut self) -> Result<()> {
         unsafe { aug_load(self.ptr) };
         self.check_error()?;
@@ -384,6 +467,9 @@ impl Augeas {
         Ok(())
     }
 
+    /// Set the value of multiple nodes in one operation. Find or create a node
+    /// matching `sub` by interpreting `sub` as a path expression relative to each
+    /// node matching `base`.
     pub fn setm(&mut self, base: &str, sub: &str, value: &str) -> Result<u32> {
         let base = CString::new(base)?;
         let sub = CString::new(sub)?;
@@ -395,6 +481,8 @@ impl Augeas {
         Ok(r as u32)
     }
 
+    /// Get the span according to the input file of the node associated with `path`. If
+    /// the node is associated with a file, the span is returned.
     pub fn span(&self, path: &str) -> Result<Option<Span>> {
         let path = CString::new(path)?;
         let mut filename: *mut c_char = ptr::null_mut();
@@ -416,38 +504,36 @@ impl Augeas {
 
         let err = unsafe { aug_error(self.ptr) };
         let err = ErrorCode::from_raw(err as _);
-        if err.is_some() {
-            if err == Some(ErrorCode::NoSpan) {
-                return Ok(None);
-            } else {
-                self.check_error()?;
-                return Ok(None);
-            }
+        if err == Some(ErrorCode::NoSpan) {
+            return Ok(None);
         }
+        self.check_error()?;
 
         result.filename = ptr_to_string(filename);
         unsafe { libc::free(filename as *mut libc::c_void) };
         Ok(Some(result))
     }
 
+    /// Use the value of node `node` as a string and transform it into a tree
+    /// using the lens `lens` and store it in the tree at `path`, which will be
+    /// overwritten. `path` and `node` are path expressions.
     pub fn text_store(&mut self, lens: &str, node: &str, path: &str) -> Result<()> {
-        let err_path = format!("/augeas/text{}/error", path);
-
         let lens = CString::new(lens)?;
         let node = CString::new(node)?;
-        let path = CString::new(path)?;
+        let c_path = CString::new(path)?;
 
-        unsafe { aug_text_store(self.ptr, lens.as_ptr(), node.as_ptr(), path.as_ptr()) };
-
-        let err = self.get(&err_path)?;
-        if let Some(kind) = err {
-            return Err(Error::from(kind));
-        }
+        unsafe { aug_text_store(self.ptr, lens.as_ptr(), node.as_ptr(), c_path.as_ptr()) };
         self.check_error()?;
+
+        let err_path = format!("/augeas/text{}", path);
+        self.check_tree_error(err_path.as_str())?;
 
         Ok(())
     }
 
+    /// Transform the tree at `path` into a string using lens `lens` and store it in
+    /// the node `node_out`, assuming the tree was initially generated using the
+    /// value of node `node_in`. `path`, `node_in` and `node_out` are path expressions.
     pub fn text_retrieve(
         &mut self,
         lens: &str,
@@ -455,11 +541,9 @@ impl Augeas {
         path: &str,
         node_out: &str,
     ) -> Result<()> {
-        let err_path = format!("/augeas/text{}/error", path);
-
         let lens = CString::new(lens)?;
         let node_in = CString::new(node_in)?;
-        let path = CString::new(path)?;
+        let c_path = CString::new(path)?;
         let node_out = CString::new(node_out)?;
 
         unsafe {
@@ -467,31 +551,35 @@ impl Augeas {
                 self.ptr,
                 lens.as_ptr(),
                 node_in.as_ptr(),
-                path.as_ptr(),
+                c_path.as_ptr(),
                 node_out.as_ptr(),
             )
         };
-
-        let err = self.get(&err_path)?;
-        if let Some(kind) = err {
-            return Err(Error::from(kind));
-        }
-
         self.check_error()?;
+        let err_path = format!("/augeas/text{}", path);
+        self.check_tree_error(err_path.as_str())?;
 
         Ok(())
     }
 
-    pub fn rename(&mut self, src: &str, lbl: &str) -> Result<()> {
+    /// Rename the label of all nodes matching SRC to LBL.
+    ///
+    /// Returns the number of nodes renamed.
+    pub fn rename(&mut self, src: &str, lbl: &str) -> Result<u32> {
         let src = CString::new(src)?;
         let lbl = CString::new(lbl)?;
 
-        unsafe { aug_rename(self.ptr, src.as_ptr(), lbl.as_ptr()) };
+        let r = unsafe { aug_rename(self.ptr, src.as_ptr(), lbl.as_ptr()) };
         self.check_error()?;
 
-        Ok(())
+        Ok(r as u32)
     }
 
+    /// Add a transform for `file` using `lens`.
+    ///
+    /// `excl` specifies if this the file is to be included or excluded from the `lens`.
+    /// The `lens` may be a module name, or a full lens name.
+    //  If a module name is given, then lns will be the lens assumed.
     pub fn transform(&mut self, lens: &str, file: &str, excl: bool) -> Result<()> {
         let lens = CString::new(lens)?;
         let file = CString::new(file)?;
@@ -502,6 +590,13 @@ impl Augeas {
         Ok(())
     }
 
+    /// Copy the node `src` to `dst`.
+    ///
+    /// `src` must match exactly one node in the
+    /// tree. `dst` must either match exactly one node in the tree or may not
+    /// exist yet. If `dst` exists already, it and all its descendants are
+    /// deleted. If `dst` does not exist yet, it and all its missing ancestors are
+    /// created.
     pub fn cp(&mut self, src: &str, dst: &str) -> Result<()> {
         let src = CString::new(src)?;
         let dst = CString::new(dst)?;
@@ -512,6 +607,14 @@ impl Augeas {
         Ok(())
     }
 
+    /// Escape special characters in a string such that it can be used as part
+    /// of a path expressions and only matches a node named exactly
+    /// `inp`. Characters that have special meanings in path expressions, such as
+    /// `[` and `]` are prefixed with a `\\`. Note that this function assumes
+    /// that it is passed a name, not a path, and will therefore escape `/`,
+    /// too.
+    ///
+    /// Returns `None` if `inp` does not need any escaping at all.
     pub fn escape_name(&self, inp: &str) -> Result<Option<String>> {
         let inp = CString::new(inp)?;
         let mut out: *mut c_char = ptr::null_mut();
@@ -525,6 +628,11 @@ impl Augeas {
         Ok(s)
     }
 
+    /// Load a `file` using the lens that would ordinarily be used by `load`,
+    /// i.e. the lens whose autoload statement matches the `file`. Similar to
+    /// `load`, this function returns successfully even if `file` does not exist
+    /// or if the `file` cannot be processed by the associated lens. It is an
+    /// error though if no lens can be found to process `file`.
     pub fn load_file(&mut self, file: &str) -> Result<()> {
         let file = CString::new(file)?;
 
@@ -534,6 +642,12 @@ impl Augeas {
         Ok(())
     }
 
+    /// For the node matching `path`, return the path to the node representing the
+    /// file to which `path` belongs.
+    ///
+    /// Returns `None` if `path` does not match any nodes.
+    ///
+    /// It is an error if `path` matches more than one node.
     pub fn source(&self, path: &str) -> Result<Option<String>> {
         let path = CString::new(path)?;
         let mut file_path: *mut c_char = ptr::null_mut();
@@ -546,6 +660,29 @@ impl Augeas {
         Ok(s)
     }
 
+    /// Return the contents of the file that would be written for the file associated with `path`.
+    //  If there is no file corresponding to `path`, it returns `None`.
+    pub fn preview(&self, path: &str) -> Result<Option<String>> {
+        let path = CString::new(path)?;
+        let mut out: *mut c_char = ptr::null_mut();
+
+        unsafe { aug_preview(self.ptr, path.as_ptr(), &mut out) };
+
+        let s = ptr_to_string(out);
+        unsafe { libc::free(out as *mut libc::c_void) };
+        self.check_error()?;
+
+        Ok(s)
+    }
+
+    /// Look up the `i`th node in the variable `var` and retrieve information about
+    /// it.
+    ///
+    /// It is assumed that `var` was defined with a path expression evaluating to
+    /// a nodeset, like `/files/etc/hosts//*`.
+    ///
+    /// If `var` does not exist, or is not a nodeset, or if it has fewer than `i`
+    /// nodes, this call fails.
     pub fn ns_attr(&self, var: &str, i: u32) -> Result<Attr> {
         let var = CString::new(var)?;
 
@@ -579,6 +716,7 @@ impl Augeas {
         Ok(attr)
     }
 
+    /// Look up the label among its siblings for the `i`th node in the variable `var`.
     pub fn ns_label(&self, var: &str, i: u32) -> Result<String> {
         let var = CString::new(var)?;
 
@@ -603,6 +741,11 @@ impl Augeas {
         }
     }
 
+    /// Look up the index of the `i`th node in the variable `var` among its siblings.
+    ///
+    /// The `index` will be set to the number of siblings + 1 of the node `var[i+1]` that precede it.
+    /// If the node `var[i+1]` does not have any siblings with the same label as
+    //  itself, `index` will be set to 0.
     pub fn ns_index(&self, var: &str, i: u32) -> Result<u32> {
         let var = CString::new(var)?;
 
@@ -622,6 +765,7 @@ impl Augeas {
         Ok(index as u32)
     }
 
+    /// Look up the value of the `i`th node in variable `var`.
     pub fn ns_value(&self, var: &str, i: u32) -> Result<Option<String>> {
         let var = CString::new(var)?;
 
@@ -633,6 +777,7 @@ impl Augeas {
         Ok(ptr_to_string(value))
     }
 
+    /// Return the number of nodes in variable `var`.
     pub fn ns_count(&self, var: &str) -> Result<u32> {
         let var = CString::new(var)?;
 
@@ -642,6 +787,7 @@ impl Augeas {
         Ok(rc as u32)
     }
 
+    /// Get the fully qualified path to the `i`th node in `var`.
     pub fn ns_path(&self, var: &str, i: u32) -> Result<Option<String>> {
         let var = CString::new(var)?;
 
@@ -674,6 +820,66 @@ impl Augeas {
             details,
         })
     }
+
+    fn check_tree_error(&self, path: &str) -> Result<()> {
+        match self.tree_error(path)? {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Try to read error information about a given path.
+    ///
+    /// Use either:
+    ///
+    /// * `/augeas/FILENAME` if the error happened for a file, or
+    /// * `/augeas/text/PATH` otherwise. `PATH` is the path to the toplevel node in
+    ///   the tree where the lens application happened.
+    pub fn tree_error(&self, err_path: &str) -> Result<Option<TreeError>> {
+        // For convenience, also accept paths containing "/error"
+        let err_path = if err_path.ends_with("/error") {
+            err_path.to_string()
+        } else {
+            format!("{}/error", err_path)
+        };
+        let err = self.get(&err_path)?;
+        if let Some(kind) = err {
+            let message = self
+                .get(&format!("{}/message", err_path))?
+                .unwrap_or_default();
+            let path = self.get(&format!("{}/path", err_path))?;
+            let lens = self.get(&format!("{}/lens", err_path))?;
+
+            // These 3 are set together or not at all
+            let pos: Option<usize> = self
+                .get(&format!("{}/pos", err_path))?
+                .and_then(|s| s.parse().ok());
+            let line: Option<usize> = self
+                .get(&format!("{}/line", err_path))?
+                .and_then(|s| s.parse().ok());
+            let char: Option<usize> = self
+                .get(&format!("{}/char", err_path))?
+                .and_then(|s| s.parse().ok());
+            let position = match (pos, line, char) {
+                (Some(position), Some(line), Some(char)) => Some(ErrorPosition {
+                    position,
+                    line,
+                    char,
+                }),
+                _ => None,
+            };
+
+            Ok(Some(TreeError {
+                kind,
+                message,
+                path,
+                position,
+                lens,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 impl Drop for Augeas {
@@ -684,306 +890,357 @@ impl Drop for Augeas {
     }
 }
 
-#[test]
-fn get_test() {
-    use error::ErrorCode;
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
-    let root_uid = aug
-        .get("etc/passwd/root/uid")
-        .unwrap()
-        .unwrap_or("unknown".to_string());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert_eq!(&root_uid, "0", "ID of root was {}", root_uid);
-
-    let nothing = aug.get("/foo");
-    assert!(nothing.is_ok());
-    assert!(nothing.ok().unwrap().is_none());
-
-    let many = aug.get("etc/passwd/*");
-
-    if let Err(Error::Augeas(err)) = many {
-        assert_eq!(err.code, ErrorCode::ManyMatches)
-    } else {
-        panic!("Unexpected value: {:?}", many)
+    #[test]
+    fn version_test() {
+        let aug = Augeas::init("", "toto", Flags::NONE).unwrap();
+        assert!(aug.version().unwrap().starts_with("1."));
     }
-}
 
-#[test]
-fn label_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
-    let root_name = aug
-        .label("etc/passwd/root")
-        .unwrap()
-        .unwrap_or("unknown".to_string());
+    #[test]
+    fn get_test() {
+        use error::ErrorCode;
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let root_uid = aug
+            .get("etc/passwd/root/uid")
+            .unwrap()
+            .unwrap_or("unknown".to_string());
 
-    assert_eq!(&root_name, "root", "name of root was {}", root_name);
-}
+        assert_eq!(&root_uid, "0", "ID of root was {}", root_uid);
 
-#[test]
-fn matches_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let nothing = aug.get("/foo");
+        assert!(nothing.is_ok());
+        assert!(nothing.ok().unwrap().is_none());
 
-    let users = aug.matches("etc/passwd/*").unwrap();
-    let count = aug.count("etc/passwd/*").unwrap();
+        let many = aug.get("etc/passwd/*");
 
-    assert_eq!(9, users.len());
-    assert_eq!(9, count);
-    assert_eq!("/files/etc/passwd/root", users[0]);
-    assert_eq!("/files/etc/passwd/nobody", users[8]);
-}
+        if let Err(Error::Augeas(err)) = many {
+            assert_eq!(err.code, ErrorCode::TooManyMatches)
+        } else {
+            panic!("Unexpected value: {:?}", many)
+        }
+    }
 
-#[test]
-fn insert_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn label_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let root_name = aug.label("etc/passwd/root").unwrap().unwrap();
 
-    aug.insert("etc/passwd/root", "before", Position::Before)
-        .unwrap();
-    aug.insert("etc/passwd/root", "after", Position::After)
-        .unwrap();
-    let users = aug.matches("etc/passwd/*").unwrap();
-    assert_eq!(
-        [
-            "/files/etc/passwd/before",
-            "/files/etc/passwd/root",
-            "/files/etc/passwd/after"
-        ],
-        users[0..3]
-    );
-}
+        assert_eq!(&root_name, "root", "name of root was {}", root_name);
+    }
 
-#[test]
-fn rm_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn matches_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let e = aug.rm("/augeas[");
-    assert!(e.is_err());
+        let users = aug.matches("etc/passwd/*").unwrap();
+        let count = aug.count("etc/passwd/*").unwrap();
 
-    let r = aug.rm("etc/passwd").unwrap();
-    assert_eq!(64, r);
-}
+        assert_eq!(9, users.len());
+        assert_eq!(9, count);
+        assert_eq!("/files/etc/passwd/root", users[0]);
+        assert_eq!("/files/etc/passwd/nobody", users[8]);
+    }
 
-#[test]
-fn mv_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn count_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let users = aug.count("etc/passwd/*").unwrap();
+        assert_eq!(9, users);
+    }
 
-    let e = aug.mv("etc/passwd", "etc/passwd/root");
-    assert!(e.is_err());
+    #[test]
+    fn insert_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    aug.mv("etc/passwd", "etc/other").unwrap();
-    assert_eq!(0, aug.count("etc/passwd").unwrap());
-    assert_eq!(1, aug.count("etc/other").unwrap());
-}
+        aug.insert("etc/passwd/root", "before", Position::Before)
+            .unwrap();
+        aug.insert("etc/passwd/root", "after", Position::After)
+            .unwrap();
+        let users = aug.matches("etc/passwd/*").unwrap();
+        assert_eq!(
+            [
+                "/files/etc/passwd/before",
+                "/files/etc/passwd/root",
+                "/files/etc/passwd/after"
+            ],
+            users[0..3]
+        );
+    }
 
-#[test]
-fn defvar_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn rm_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    aug.defvar("x", "etc/passwd/*").unwrap();
-    let n = aug.count("$x").unwrap();
+        let e = aug.rm("/augeas[");
+        assert!(e.is_err());
 
-    assert_eq!(9, n);
-}
+        let r = aug.rm("etc/passwd").unwrap();
+        assert_eq!(64, r);
+    }
 
-#[test]
-fn defnode_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn mv_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let created = aug.defnode("y", "etc/notthere", "there").unwrap();
-    assert!(created);
+        let e = aug.mv("etc/passwd", "etc/passwd/root");
+        assert!(e.is_err());
 
-    let there = aug.get("$y").unwrap();
-    assert_eq!("there", there.expect("failed to get etc/notthere"));
+        aug.mv("etc/passwd", "etc/other").unwrap();
+        assert_eq!(0, aug.count("etc/passwd").unwrap());
+        assert_eq!(1, aug.count("etc/other").unwrap());
+    }
 
-    let created = aug.defnode("z", "etc/passwd", "there").unwrap();
-    assert!(!created);
-}
+    #[test]
+    fn defvar_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-#[test]
-fn load_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        aug.defvar("x", "etc/passwd/*").unwrap();
+        let n = aug.count("$x").unwrap();
 
-    aug.set("etc/passwd/root/uid", "42").unwrap();
-    aug.load().unwrap();
-    let uid = aug.get("etc/passwd/root/uid").unwrap();
-    assert_eq!("0", uid.expect("expected value for root/uid"));
-}
+        assert_eq!(9, n);
+    }
 
-#[test]
-fn setm_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn defnode_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let count = aug.setm("etc/passwd", "*/shell", "/bin/zsh").unwrap();
-    assert_eq!(9, count);
-}
+        let created = aug.defnode("y", "etc/notthere", "there").unwrap();
+        assert!(created);
 
-#[test]
-fn span_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::ENABLE_SPAN).unwrap();
+        let there = aug.get("$y").unwrap();
+        assert_eq!("there", there.expect("failed to get etc/notthere"));
 
-    // happy path
-    let span = aug.span("etc/passwd/root").unwrap().unwrap();
-    assert_eq!(0..4, span.label);
-    assert_eq!(0..0, span.value);
-    assert_eq!(0..32, span.span);
-    assert_eq!("tests/test_root/etc/passwd", span.filename.unwrap());
+        let created = aug.defnode("z", "etc/passwd", "there").unwrap();
+        assert!(!created);
+    }
 
-    // no span info associated with node
-    let span = aug.span("/augeas/load").unwrap();
-    assert!(span.is_none());
+    #[test]
+    fn load_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    // too many matches
-    let span = aug.span("etc/passwd/*");
-    assert!(span.is_err());
-}
+        aug.set("etc/passwd/root/uid", "42").unwrap();
+        aug.load().unwrap();
+        let uid = aug.get("etc/passwd/root/uid").unwrap();
+        assert_eq!("0", uid.expect("expected value for root/uid"));
+    }
 
-#[test]
-fn store_retrieve_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+    #[test]
+    fn setm_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    aug.set("/text/in", "alex:x:12:12:Alex:/home/alex:/bin/sh\n")
-        .unwrap();
-    aug.text_store("Passwd.lns", "/text/in", "/stored").unwrap();
-    aug.set("/stored/alex/uid", "17").unwrap();
+        let count = aug.setm("etc/passwd", "*/shell", "/bin/zsh").unwrap();
+        assert_eq!(9, count);
+    }
 
-    aug.text_retrieve("Passwd.lns", "/text/in", "/stored", "/text/out")
-        .unwrap();
-    let text = aug.get("/text/out").unwrap().unwrap();
-    assert_eq!("alex:x:17:12:Alex:/home/alex:/bin/sh\n", text);
+    #[test]
+    fn span_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::ENABLE_SPAN).unwrap();
 
-    // Invalidate the tree; 'shell' must be present
-    aug.rm("/stored/alex/shell").unwrap();
-    let err = aug
-        .text_retrieve("Passwd.lns", "/text/in", "/stored", "/text/out")
-        .err()
-        .unwrap();
-    assert_eq!("parse error of kind put_failed", format!("{}", err));
+        // happy path
+        let span = aug.span("etc/passwd/root").unwrap().unwrap();
+        assert_eq!(0..4, span.label);
+        assert_eq!(0..0, span.value);
+        assert_eq!(0..32, span.span);
+        assert_eq!("tests/test_root/etc/passwd", span.filename.unwrap());
 
-    aug.set("/text/in", "alex:invalid passwd entry").unwrap();
-    let err = aug
-        .text_store("Passwd.lns", "/text/in", "/stored")
-        .err()
-        .unwrap();
-    assert_eq!("parse error of kind parse_failed", format!("{}", err));
-}
+        // no span info associated with node
+        let span = aug.span("/augeas/load").unwrap();
+        assert!(span.is_none());
 
-#[test]
-fn rename_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        // too many matches
+        let span = aug.span("etc/passwd/*");
+        assert!(span.is_err());
+    }
 
-    aug.rename("etc/passwd/root", "ruth").unwrap();
+    #[test]
+    fn store_retrieve_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let ruth = aug.get("etc/passwd/ruth/uid").unwrap().unwrap();
-    assert_eq!("0", ruth);
+        aug.set("/text/in", "alex:x:12:12:Alex:/home/alex:/bin/sh\n")
+            .unwrap();
+        aug.text_store("Passwd.lns", "/text/in", "/stored").unwrap();
+        aug.set("/stored/alex/uid", "17").unwrap();
 
-    let root = aug.get("etc/passwd/root/uid").unwrap();
-    assert!(root.is_none());
-}
+        aug.text_retrieve("Passwd.lns", "/text/in", "/stored", "/text/out")
+            .unwrap();
+        let text = aug.get("/text/out").unwrap().unwrap();
+        assert_eq!("alex:x:17:12:Alex:/home/alex:/bin/sh\n", text);
 
-#[test]
-fn transform_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        // Invalidate the tree; 'shell' must be present
+        aug.rm("/stored/alex/shell").unwrap();
+        let err = aug
+            .text_retrieve("Passwd.lns", "/text/in", "/stored", "/text/out")
+            .err()
+            .unwrap();
 
-    aug.transform("Hosts.lns", "/usr/local/etc/hosts", false)
-        .unwrap();
-    let p = aug
-        .get("/augeas/load/Hosts/incl[. = '/usr/local/etc/hosts']")
-        .unwrap();
-    assert!(p.is_some());
-}
+        if let Error::Tree(e) = err {
+            assert_eq!("/stored/stored/alex", e.path.unwrap().as_str());
+            assert_eq!(None, e.position);
+            assert_eq!("put_failed", e.kind);
+            assert!(!e.lens.unwrap().is_empty());
+            assert!(e.message.starts_with("Failed to match tree under"));
+        } else {
+            panic!("Unexpected error: {:?}", err);
+        }
 
-#[test]
-fn cp_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        aug.set("/text/in", "alex:invalid passwd entry").unwrap();
+        let err = aug
+            .text_store("Passwd.lns", "/text/in", "/stored")
+            .err()
+            .unwrap();
+        if let Error::Tree(e) = err {
+            assert_eq!(e.message, "Iterated lens matched less than it should");
+            assert_eq!(
+                ErrorPosition {
+                    position: 5,
+                    line: 1,
+                    char: 5,
+                },
+                e.position.unwrap()
+            );
+            assert_eq!("parse_failed", e.kind);
+            assert_eq!("/stored/stored/alex", e.path.unwrap());
+            assert!(!e.lens.unwrap().is_empty());
+        } else {
+            panic!("Unexpected error: {:?}", err);
+        }
+    }
 
-    aug.cp("etc/passwd/root", "etc/passwd/ruth").unwrap();
-    let ruth = aug.get("etc/passwd/ruth/uid").unwrap().unwrap();
-    assert_eq!("0", ruth);
+    #[test]
+    fn rename_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let root = aug.get("etc/passwd/root/uid").unwrap().unwrap();
-    assert_eq!("0", root);
-}
+        aug.rename("etc/passwd/root", "ruth").unwrap();
 
-#[test]
-fn escape_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let ruth = aug.get("etc/passwd/ruth/uid").unwrap().unwrap();
+        assert_eq!("0", ruth);
 
-    // no escaping needed
-    let n = aug.escape_name("foo");
-    assert_eq!(Ok(None), n);
+        let root = aug.get("etc/passwd/root/uid").unwrap();
+        assert!(root.is_none());
+    }
 
-    let n = aug.escape_name("foo[");
-    assert_eq!(Ok(Some(String::from("foo\\["))), n);
-}
+    #[test]
+    fn transform_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-#[test]
-fn load_file_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NO_LOAD).unwrap();
+        aug.transform("Hosts.lns", "/usr/local/etc/hosts", false)
+            .unwrap();
+        let p = aug
+            .get("/augeas/load/Hosts/incl[. = '/usr/local/etc/hosts']")
+            .unwrap();
+        assert!(p.is_some());
+    }
 
-    aug.load_file("/etc/passwd").unwrap();
-    let root = aug.get("etc/passwd/root/uid").unwrap();
-    assert!(root.is_some());
+    #[test]
+    fn cp_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let err = aug.load_file("/var/no/lens/for/this");
-    assert!(err.is_err());
-    let e = err.err().unwrap();
-    assert!(e.is_code(ErrorCode::NoLens));
-}
+        aug.cp("etc/passwd/root", "etc/passwd/ruth").unwrap();
+        let ruth = aug.get("etc/passwd/ruth/uid").unwrap().unwrap();
+        assert_eq!("0", ruth);
 
-#[test]
-fn source_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let root = aug.get("etc/passwd/root/uid").unwrap().unwrap();
+        assert_eq!("0", root);
+    }
 
-    let s = aug.source("etc/passwd/root/uid").unwrap();
-    // s should be Some("/files/etc/passwd") but Augeas versions before
-    // 1.11 had a bug that makes the result always None
-    assert!(s.is_none() || s.unwrap() == "/files/etc/passwd")
-}
+    #[test]
+    fn escape_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-#[test]
-fn ns_test() {
-    let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        // no escaping needed
+        let n = aug.escape_name("foo");
+        assert_eq!(Ok(None), n);
 
-    aug.defvar("x", "etc/passwd/*").unwrap();
-    aug.defvar("uid", "etc/passwd/*/uid").unwrap();
+        let n = aug.escape_name("foo[");
+        assert_eq!(Ok(Some(String::from("foo\\["))), n);
+    }
 
-    let attr = aug.ns_attr("x", 0).unwrap();
-    assert_eq!("root", attr.label.unwrap());
-    assert!(attr.value.is_none());
-    assert_eq!("/files/etc/passwd", attr.file_path.unwrap());
+    #[test]
+    fn load_file_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NO_LOAD).unwrap();
 
-    let attr = aug.ns_attr("x", 10000).unwrap_err();
-    assert!(attr.is_code(ErrorCode::NoMatch));
+        aug.load_file("/etc/passwd").unwrap();
+        let root = aug.get("etc/passwd/root/uid").unwrap();
+        assert!(root.is_some());
 
-    let attr = aug.ns_attr("y", 0).unwrap_err();
-    assert!(attr.is_code(ErrorCode::NoMatch));
+        let err = aug.load_file("/var/no/lens/for/this");
+        assert!(err.is_err());
+        let e = err.err().unwrap();
+        assert!(e.is_code(ErrorCode::NoLens));
+    }
 
-    let label = aug.ns_label("x", 0).unwrap();
-    assert_eq!("root", label);
+    #[test]
+    fn source_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let index = aug.ns_index("x", 4).unwrap();
-    assert_eq!(0, index);
+        let s = aug.source("etc/passwd/root/uid").unwrap();
+        // s should be Some("/files/etc/passwd") but Augeas versions before
+        // 1.11 had a bug that makes the result always None
+        assert!(s.is_none() || s.unwrap() == "/files/etc/passwd")
+    }
 
-    let uid = aug.ns_value("uid", 2).unwrap().unwrap();
-    assert_eq!("2", &uid);
+    #[test]
+    fn preview_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    let count = aug.ns_count("uid").unwrap();
-    assert_eq!(9, count);
+        let s = aug.preview("etc/non-existing").unwrap_err();
+        assert!(matches!(s, Error::Augeas(err) if err.code == ErrorCode::NoMatch));
 
-    let path = aug.ns_path("uid", 0).unwrap().unwrap();
-    assert_eq!("/files/etc/passwd/root/uid", path);
-}
+        let s = aug.preview("etc/passwd/root/uid").unwrap();
+        let content = include_str!("../tests/test_root/etc/passwd");
+        assert_eq!(s.unwrap(), content);
+    }
 
-#[test]
-fn error_test() {
-    let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
-    let garbled = aug.matches("/invalid[");
+    #[test]
+    fn ns_test() {
+        let mut aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
 
-    if let Err(Error::Augeas(err)) = garbled {
-        assert_eq!(err.code, ErrorCode::PathExpr);
-        assert_eq!(err.message.unwrap(), "Invalid path expression");
-        assert_eq!(err.minor_message.unwrap(), "illegal string literal");
-        assert_eq!(err.details.unwrap(), "/invalid[|=|")
-    } else {
-        panic!("Unexpected value: {:?}", garbled)
+        aug.defvar("x", "etc/passwd/*").unwrap();
+        aug.defvar("uid", "etc/passwd/*/uid").unwrap();
+
+        let attr = aug.ns_attr("x", 0).unwrap();
+        assert_eq!("root", attr.label.unwrap());
+        assert!(attr.value.is_none());
+        assert_eq!("/files/etc/passwd", attr.file_path.unwrap());
+
+        let attr = aug.ns_attr("x", 10000).unwrap_err();
+        assert!(attr.is_code(ErrorCode::NoMatch));
+
+        let attr = aug.ns_attr("y", 0).unwrap_err();
+        assert!(attr.is_code(ErrorCode::NoMatch));
+
+        let label = aug.ns_label("x", 0).unwrap();
+        assert_eq!("root", label);
+
+        let index = aug.ns_index("x", 4).unwrap();
+        assert_eq!(0, index);
+
+        let uid = aug.ns_value("uid", 2).unwrap().unwrap();
+        assert_eq!("2", &uid);
+
+        let count = aug.ns_count("uid").unwrap();
+        assert_eq!(9, count);
+
+        let path = aug.ns_path("uid", 0).unwrap().unwrap();
+        assert_eq!("/files/etc/passwd/root/uid", path);
+    }
+
+    #[test]
+    fn error_test() {
+        let aug = Augeas::init("tests/test_root", "", Flags::NONE).unwrap();
+        let garbled = aug.matches("/invalid[");
+
+        if let Err(Error::Augeas(err)) = garbled {
+            assert_eq!(err.code, ErrorCode::PathExpr);
+            assert_eq!(err.message.unwrap(), "Invalid path expression");
+            assert_eq!(err.minor_message.unwrap(), "illegal string literal");
+            assert_eq!(err.details.unwrap(), "/invalid[|=|")
+        } else {
+            panic!("Unexpected value: {:?}", garbled)
+        }
     }
 }
