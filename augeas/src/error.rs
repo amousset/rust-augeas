@@ -16,6 +16,10 @@ pub enum Error {
     Nul(NulError),
 }
 
+impl std::error::Error for Error {}
+impl std::error::Error for TreeError {}
+impl std::error::Error for AugeasError {}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
